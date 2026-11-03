@@ -1,114 +1,170 @@
+import os
+import threading
 import time
-import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.request
-import ssl
+import urllib.parse
+import json
 
-TELEGRAM_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
-CHAT_ID = "6264127581"
+# ==================== НАСТРОЙКИ СТРАТЕГИИ ====================
+TELEGRAM_BOT_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
+TELEGRAM_CHAT_ID = "6264127581"
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
-TIMEFRAME = "15"
-EMA_PERIOD = 200
-MARGIN = 10.0
-LEVERAGE = 10
-TP_PCT = 0.45
-SL_PCT = 0.15
+LEVERAGE = 10         # Торговое плечо
+RISK_REWARD_RATIO = 3 # Соотношение 3:1
+EMA_PERIOD = 200      # Период EMA
+INTERVAL = "5"        # Таймфрейм в минутах (5 минут)
+TOP_LIMIT = 35        # Количество топ-монет для анализа за раз
+# ============================================================
 
-ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
 
-last_signals = {symbol: None for symbol in SYMBOLS}
+# 1. Мини-сервер для Render (удерживает порт открытым 24/7)
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bybit Trend Scalping Bot is active!")
+        
+    def log_message(self, format, *args):
+        pass
 
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = json.dumps({"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}).encode('utf-8')
-    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
+
+server_thread = threading.Thread(target=run_server, daemon=True)
+server_thread.start()
+
+
+# 2. Функция отправки сигналов в Telegram
+def send_telegram_message(text):
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as response:
             pass
     except Exception as e:
-        print(f"Ошибка отправки Telegram: {e}")
+        print(f"Ошибка отправки в Telegram: {e}")
 
-def get_klines(symbol):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={TIMEFRAME}&limit=205"
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+
+# 3. Получение топ-монет по суточному объему с Bybit (linear фьючерсы)
+def get_top_trending_symbols(limit=35):
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            if data.get('retCode') == 0:
-                raw = data['result']['list']
-                closes = [float(c[4]) for c in reversed(raw)]
+        url = "https://api.bybit.com/v5/market/tickers?category=linear"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res = json.loads(response.read().decode("utf-8"))
+            if res["retCode"] == 0:
+                tickers = res["result"]["list"]
+                # Фильтруем только USDT пары, исключаем стейблкоины
+                usdt_tickers = [
+                    t for t in tickers 
+                    if t["symbol"].endswith("USDT") and not t["symbol"].startswith("USDC")
+                ]
+                
+                # Сортируем по торговому обороту за 24 часа (turnover24h) от большего к меньшему
+                usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+                
+                # Берем топ N монет
+                top_symbols = [t["symbol"] for t in usdt_tickers[:limit]]
+                return top_symbols
+    except Exception as e:
+        print(f"Ошибка получения списка топ-монет: {e}")
+    return []
+
+
+# 4. Получение исторических данных свечей
+def get_klines(symbol, interval, limit=250):
+    try:
+        url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res = json.loads(response.read().decode("utf-8"))
+            if res["retCode"] == 0:
+                list_data = res["result"]["list"]
+                list_data.reverse()
+                closes = [float(candle[4]) for candle in list_data]
                 return closes
     except Exception as e:
-        print(f"Ошибка получения данных для {symbol}: {e}")
+        pass
     return None
 
-def calculate_ema(data, period=200):
+
+# 5. Расчет EMA
+def calculate_ema(data, period):
     if len(data) < period:
         return None
     multiplier = 2 / (period + 1)
-    sma = sum(data[:period]) / period
-    ema = sma
+    ema = sum(data[:period]) / period
     for price in data[period:]:
         ema = (price - ema) * multiplier + ema
     return ema
 
+
+# 6. Основной цикл анализа
 def main():
-    print("🚀 Торговый сканер Bybit запущен 24/7...")
-    send_telegram("🚀 *Сканер EMA 200 успешно запущен и готов к работе!*")
+    start_msg = (
+        "🚀 *Авто-сканер топ трендовых монет запущен!*\n"
+        f"📊 Стратегия: Пересечение EMA {EMA_PERIOD} (5m)\n"
+        f"🎯 Risk/Reward: {RISK_REWARD_RATIO}:1 | Плечо: {LEVERAGE}x\n"
+        f"🔥 Анализирует топ-{TOP_LIMIT} монет по объему за 24ч."
+    )
+    print("Бот успешно запущен!")
+    send_telegram_message(start_msg)
 
     while True:
         try:
-            for symbol in SYMBOLS:
-                closes = get_klines(symbol)
-                if not closes or len(closes) < 201:
+            # Динамически получаем актуальный топ самых движущихся монет за день
+            symbols = get_top_trending_symbols(TOP_LIMIT)
+            if not symbols:
+                time.sleep(30)
+                continue
+
+            print(f"Сканирование топ-{len(symbols)} активных монет...")
+
+            for symbol in symbols:
+                closes = get_klines(symbol, INTERVAL, limit=250)
+                if not closes or len(closes) < EMA_PERIOD:
                     continue
 
-                prev_price = closes[-3]
-                curr_price = closes[-2]
+                ema_200 = calculate_ema(closes, EMA_PERIOD)
+                current_price = closes[-1]
+                prev_price = closes[-2]
 
-                ema_prev = calculate_ema(closes[:-2], EMA_PERIOD)
-                ema_curr = calculate_ema(closes[:-1], EMA_PERIOD)
-
-                if not ema_prev or not ema_curr:
-                    continue
-
-                signal = None
-                if prev_price <= ema_prev and curr_price > ema_curr:
-                    signal = "LONG 🟢"
-                elif prev_price >= ema_prev and curr_price < ema_curr:
-                    signal = "SHORT 🔴"
-
-                if signal and last_signals[symbol] != signal:
-                    last_signals[symbol] = signal
-                    
-                    entry = curr_price
-                    if "LONG" in signal:
-                        tp = entry * (1 + (TP_PCT / LEVERAGE))
-                        sl = entry * (1 - (SL_PCT / LEVERAGE))
-                    else:
-                        tp = entry * (1 - (TP_PCT / LEVERAGE))
-                        sl = entry * (1 + (SL_PCT / LEVERAGE))
-
+                # Логика пересечения EMA 200 (Лонг)
+                if prev_price <= ema_200 and current_price > ema_200:
                     msg = (
-                        f"🚨 *СИГНАЛ: {symbol} [{signal}]*\n\n"
-                        f"• *Таймфрейм:* {TIMEFRAME}m (EMA 200)\n"
-                        f"• *Цена входа:* `{entry:.4f}`\n"
-                        f"• *Плечо:* {LEVERAGE}x\n"
-                        f"• *Маржа:* ${MARGIN:.2f}\n"
-                        f"• *Take-Profit (+45%):* `{tp:.4f}` (+$4.50)\n"
-                        f"• *Stop-Loss (-15%):* `{sl:.4f}` (-$1.50)\n\n"
-                        f"⚡ _Заходи на Bybit и открывай позицию!_"
+                        f"🟢 *СИГНАЛ НА ПОКУПКУ (LONG)*\n"
+                        f"🪙 Монета: `{symbol}`\n"
+                        f"📈 Цена: `{current_price}`\n"
+                        f"📉 EMA 200: `{round(ema_200, 4)}`\n"
+                        f"⚡ Плечо: `{LEVERAGE}x`\n"
+                        f"🎯 Take Profit (3:1)"
                     )
-                    print(f"[{symbol}] Сигнал найден: {signal}")
-                    send_telegram(msg)
+                    send_telegram_message(msg)
 
-            time.sleep(30)
+                # Логика пересечения EMA 200 (Шорт)
+                elif prev_price >= ema_200 and current_price < ema_200:
+                    msg = (
+                        f"🔴 *СИГНАЛ НА ПРОДАЖУ (SHORT)*\n"
+                        f"🪙 Монета: `{symbol}`\n"
+                        f"📈 Цена: `{current_price}`\n"
+                        f"📉 EMA 200: `{round(ema_200, 4)}`\n"
+                        f"⚡ Плечо: `{LEVERAGE}x`\n"
+                        f"🎯 Take Profit (3:1)"
+                    )
+                    send_telegram_message(msg)
+
+                time.sleep(1) # Небольшая пауза между монетами
+
+            # Пауза перед следующим полным кругом сканирования рынка
+            time.sleep(120)
 
         except Exception as e:
-            print(f"Системная ошибка: {e}")
-            time.sleep(10)
+            print(f"Ошибка в цикле: {e}")
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()

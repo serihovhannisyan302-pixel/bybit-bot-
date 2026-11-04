@@ -1,183 +1,158 @@
-import os
-import time
+import asyncio
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import urllib.request
-import urllib.parse
-import json
+import ccxt.pro as ccxt
+import pandas as pd
+import numpy as np
+import aiohttp
+from fastapi import FastAPI
 
-# ==================== НАСТРОЙКИ СТРАТЕГИИ ====================
-TELEGRAM_BOT_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
-TELEGRAM_CHAT_ID = "6264127581"
+# --- НАСТРОЙКИ BYBIT (ЗАМЕНИ НА СВОИ КЛЮЧИ) ---
+exchange = ccxt.bybit({
+    'apiKey': 'ВАШ_BYBIT_API_KEY',
+    'secret': 'ВАШ_BYBIT_SECRET_KEY',
+    'options': {'defaultType': 'linear'}
+})
 
-LEVERAGE = 10         
-RISK_REWARD_RATIO = 3 
-EMA_PERIOD = 200      
-INTERVAL = "15"       # Таймфрейм 15 минут
-TOP_LIMIT = 35        
-# ============================================================
+TIMEFRAME = '15m'
+LEVERAGE = 10
+RISK_PERCENT = 0.10
 
-# 1. Легковесный HTTP-сервер для Render (защита от засыпания)
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args):
-        pass
+# --- НАСТРОЙКИ TELEGRAM (ТВОИ ДАННЫЕ) ---
+TELEGRAM_TOKEN = '9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw'
+TELEGRAM_CHAT_ID = '6264127581'
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
+SYMBOLS_POOL = [
+    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT', 
+    'ADA/USDT:USDT', 'DOGE/USDT:USDT', 'AVAX/USDT:USDT', 'LINK/USDT:USDT', 
+    'DOT/USDT:USDT', 'MATIC/USDT:USDT', 'NEAR/USDT:USDT', 'UNI/USDT:USDT', 
+    'ATOM/USDT:USDT', 'ICP/USDT:USDT', 'LTC/USDT:USDT', 'APT/USDT:USDT', 
+    'FTM/USDT:USDT', 'RNDR/USDT:USDT', 'INJ/USDT:USDT', 'TIA/USDT:USDT', 
+    'ARB/USDT:USDT', 'OP/USDT:USDT', 'SUI/USDT:USDT', 'SEI/USDT:USDT', 
+    'PEPE/USDT:USDT', 'SHIB/USDT:USDT', 'RENDER/USDT:USDT', 'JUP/USDT:USDT', 
+    'DYDX/USDT:USDT', 'GALA/USDT:USDT', 'CRV/USDT:USDT', 'KAS/USDT:USDT', 
+    'FIL/USDT:USDT', 'ETC/USDT:USDT', 'BCH/USDT:USDT'
+]
 
-# Запускаем веб-сервер в фоне
-server_thread = threading.Thread(target=run_web_server, daemon=True)
-server_thread.start()
+app = FastAPI()
 
-def send_telegram_message(text):
+@app.get("/")
+def health_check():
+    """Эндпоинт для поддержания активности бота на Render"""
+    return {"status": "Bot is running live!"}
+
+async def send_telegram_message(text: str):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as response:
-            pass
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=10) as response:
+                pass
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Ошибка Telegram: {e}")
 
-def get_top_trending_symbols(limit=35):
-    try:
-        url = "https://api.bybit.com/v5/market/tickers?category=linear"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            res = json.loads(response.read().decode("utf-8"))
-            if res["retCode"] == 0:
-                tickers = res["result"]["list"]
-                usdt_tickers = [
-                    t for t in tickers 
-                    if t["symbol"].endswith("USDT") and not t["symbol"].startswith("USDC")
-                ]
-                usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-                return [t["symbol"] for t in usdt_tickers[:limit]]
-    except Exception as e:
-        print(f"Bybit API error: {e}")
-    return []
-
-def get_klines(symbol, interval, limit=250):
-    try:
-        url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            res = json.loads(response.read().decode("utf-8"))
-            if res["retCode"] == 0:
-                list_data = res["result"]["list"]
-                list_data.reverse()
-                return [float(candle[4]) for candle in list_data]
-    except:
-        pass
-    return None
-
-def calculate_ema(data, period):
-    if len(data) < period:
-        return None
-    multiplier = 2 / (period + 1)
-    ema = sum(data[:period]) / period
-    for price in data[period:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
-
-def main():
-    print("Бот успешно запущен на 15m таймфрейме и начал сканирование рынка...")
+def calculate_indicators(ohlcv) -> pd.DataFrame:
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()
     
-    start_msg = (
-        f"💎 **EMA 200 TRADING SYSTEM** 🚀\n"
-        f"═══════════════════════\n"
-        f"⚡ **Статус:** `Активен (Live)`\n"
-        f"⏱ **Таймфрейм:** `15m`\n"
-        f"🎯 **Цель:** TP `+45%` | SL `-15%`\n"
-        f"🔥 **Сканер:** Топ-{TOP_LIMIT} монет по объему\n"
-        f"═══════════════════════"
-    )
-    send_telegram_message(start_msg)
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    df['ATR'] = np.max(ranges, axis=1).rolling(14).mean()
+    
+    plus_dm = df['high'].diff().clip(lower=0)
+    minus_dm = df['low'].diff().clip(lower=0)
+    tr14 = df['ATR'].rolling(14).sum()
+    plus_di = 100 * (plus_dm.rolling(14).sum() / tr14)
+    minus_di = 100 * (minus_dm.rolling(14).sum() / tr14)
+    df['ADX'] = (100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)).rolling(14).mean()
+    
+    return df
 
-    last_signal_time = {}
-    COOLDOWN_TIME = 3600  # 1 час паузы по монете
+async def analyze_symbol(symbol: str):
+    try:
+        ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=250)
+        df = calculate_indicators(ohlcv)
+        
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        close = last['close']
+        ema = last['EMA_200']
+        atr = last['ATR']
+        avg_atr = df['ATR'].rolling(20).mean().iloc[-1]
+        adx = last['ADX']
+        
+        if atr < (avg_atr * 0.7) or adx < 23:
+            return
+            
+        body_size = abs(close - last['open'])
+        avg_body = abs(df['close'] - df['open']).rolling(20).mean().iloc[-1]
+        
+        signal = None
+        if prev['close'] <= prev['EMA_200'] and close > ema and body_size >= (avg_body * 1.2):
+            signal = 'BUY'
+        elif prev['close'] >= prev['EMA_200'] and close < ema and body_size >= (avg_body * 1.2):
+            signal = 'SELL'
+            
+        if signal:
+            await execute_trade_async(symbol, signal, close)
+    except Exception:
+        pass
 
-    while True:
-        try:
-            symbols = get_top_trending_symbols(TOP_LIMIT)
-            if not symbols:
-                print("Не удалось получить список монет, повтор через 30 секунд...")
-                time.sleep(30)
-                continue
+async def execute_trade_async(symbol: str, signal: str, entry_price: float):
+    try:
+        balance_info = await exchange.fetch_balance()
+        balance = balance_info['USDT']['free']
+        margin_to_risk = balance * RISK_PERCENT
+        
+        if signal == 'BUY':
+            stop_loss = entry_price * (1 - 0.015)
+            take_profit = entry_price * (1 + 0.045)
+            emoji = '🟢 **LONG (ПОКУПКА)**'
+        else:
+            stop_loss = entry_price * (1 + 0.015)
+            take_profit = entry_price * (1 - 0.045)
+            emoji = '🔴 **SHORT (ПРОДАЖА)**'
+            
+        msg = (
+            f"{emoji}\n"
+            f"📌 Монета: `{symbol}`\n"
+            f"💰 Цена входа: `{entry_price}`\n"
+            f"🛑 Стоп-лосс (-1.5%): `{stop_loss:.2f}`\n"
+            f"🎯 Тейк-профит (+4.5%): `{take_profit:.2f}`\n"
+            f"⚖️ Риск (10%): `${margin_to_risk:.2f} (Плечо {LEVERAGE}x)`"
+        )
+        
+        await send_telegram_message(msg)
+        
+        # Автоматическая торговля на Bybit (раскомментируй для реальной работы)
+        # await exchange.set_leverage(LEVERAGE, symbol)
+        # await exchange.create_order(symbol, 'market', signal.lower(), (margin_to_risk * LEVERAGE) / entry_price)
+    except Exception as e:
+        await send_telegram_message(f"❌ Ошибка ордера по {symbol}: {e}")
 
-            current_time = time.time()
+async def background_trading_loop():
+    """Фоновый цикл сканирования рынка"""
+    await asyncio.sleep(5)  генерация паузы при старте сервера
+    await send_telegram_message("🚀 Бот успешно запущен на Render! Пул из 35 монет под защитой.")
+    
+    try:
+        await exchange.load_markets()
+        while True:
+            tasks = [analyze_symbol(symbol) for symbol in SYMBOLS_POOL]
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(60)
+    except Exception as e:
+        print(f"Критическая ошибка цикла: {e}")
+    finally:
+        await exchange.close()
 
-            for symbol in symbols:
-                closes = get_klines(symbol, INTERVAL, limit=250)
-                if not closes or len(closes) < EMA_PERIOD:
-                    continue
+def run_bg_loop():
+    asyncio.run(background_trading_loop())
 
-                ema_200 = calculate_ema(closes, EMA_PERIOD)
-                current_price = closes[-1]
-                prev_price = closes[-2]
-
-                last_sent = last_signal_time.get(symbol, 0)
-                if current_time - last_sent < COOLDOWN_TIME:
-                    time.sleep(0.5)
-                    continue
-
-                # Расчет уровней для LONG
-                if prev_price <= ema_200 and current_price > ema_200:
-                    tp_price = current_price * 1.045
-                    sl_price = current_price * 0.985
-                    
-                    msg = (
-                        f"🟢 **NEW LONG SIGNAL // BYBIT** 📈\n"
-                        f"═══════════════════════\n"
-                        f"🔹 **Монета:** `{symbol}`\n"
-                        f"📍 **Точка входа:** `{current_price}`\n"
-                        f"📊 **Индикатор EMA 200:** `{round(ema_200, 4)}`\n"
-                        f"═══════════════════════\n"
-                        f"🎯 **TAKE PROFIT (+45%):** `✨ {round(tp_price, 4)}`\n"
-                        f"🛑 **STOP LOSS (-15%):** `🛡 {round(sl_price, 4)}`\n"
-                        f"═══════════════════════\n"
-                        f"⚡ **Плечо:** `{LEVERAGE}x` | 🎯 **R/R:** `{RISK_REWARD_RATIO}:1`\n"
-                        f"⏰ **Таймфрейм:** `15m`"
-                    )
-                    send_telegram_message(msg)
-                    last_signal_time[symbol] = current_time
-                    print(f"Отправлен LONG сигнал по монете: {symbol}")
-
-                # Расчет уровней для SHORT
-                elif prev_price >= ema_200 and current_price < ema_200:
-                    tp_price = current_price * 0.955
-                    sl_price = current_price * 1.015
-                    
-                    msg = (
-                        f"🔴 **NEW SHORT SIGNAL // BYBIT** 📉\n"
-                        f"═══════════════════════\n"
-                        f"🔹 **Монета:** `{symbol}`\n"
-                        f"📍 **Точка входа:** `{current_price}`\n"
-                        f"📊 **Индикатор EMA 200:** `{round(ema_200, 4)}`\n"
-                        f"═══════════════════════\n"
-                        f"🎯 **TAKE PROFIT (+45%):** `✨ {round(tp_price, 4)}`\n"
-                        f"🛑 **STOP LOSS (-15%):** `🛡 {round(sl_price, 4)}`\n"
-                        f"═══════════════════════\n"
-                        f"⚡ **Плечо:** `{LEVERAGE}x` | 🎯 **R/R:** `{RISK_REWARD_RATIO}:1`\n"
-                        f"⏰ **Таймфрейм:** `15m`"
-                    )
-                    send_telegram_message(msg)
-                    last_signal_time[symbol] = current_time
-                    print(f"Отправлен SHORT сигнал по монете: {symbol}")
-
-                time.sleep(1)
-
-            time.sleep(120)
-
-        except Exception as e:
-            print(f"Loop error: {e}")
-            time.sleep(60)
-
-if __name__ == "__main__":
-    main()
+@app.on_event("startup")
+def startup_event():
+    """Запуск торгового потока параллельно с веб-сервером FastAPI"""
+    t = threading.Thread(target=run_bg_loop, daemon=True)
+    t.start()

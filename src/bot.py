@@ -16,19 +16,15 @@ app = FastAPI()
 TELEGRAM_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
 CHAT_ID = "6264127581"
 
-# Настройки прокси (если используете прокси для обхода блокировки Render)
-# Пример: "http://proxy_ip:proxy_port" или оставьте пустым, если нашли другой способ
-PROXY_URL = os.environ.get("PROXY_URL", None) 
-
-# Параметры вашей стратегии и симуляции
+# Параметры стратегии
 LEVERAGE = 10
-TAKE_PROFIT_PCT = 45.0  # Цель по движению цены (+45%)
-STOP_LOSS_PCT = 15.0    # Базовый стоп-лосс (-15%)
-TRAILING_ACTIVATION = 15.0  # Активация трейлинг-стопа после +15% движения
-TRAILING_STEP = 5.0         # Шаг подтягивания трейлинга (5%)
+TAKE_PROFIT_PCT = 45.0  
+STOP_LOSS_PCT = 15.0    
+TRAILING_ACTIVATION = 15.0  
+TRAILING_STEP = 5.0         
 TIMEFRAME = '15m'
-CANDLE_LIMIT = 250      # Глубокий анализ истории (250 свечей)
-TOP_COINS_COUNT = 35    # Топ-35 монет по объему (без "мусора")
+CANDLE_LIMIT = 250      
+TOP_COINS_COUNT = 35    
 
 async def send_telegram_alert(message: str):
     """Отправка сообщения в Telegram"""
@@ -51,52 +47,42 @@ async def send_telegram_alert(message: str):
 async def root():
     return {
         "status": "running", 
-        "mode": "Advanced Signal Generator with Proxy & Simulation",
-        "message": f"Bybit Top-{TOP_COINS_COUNT} EMA 200 Bot active | {LEVERAGE}x Leverage"
+        "mode": "EMA 200 Trend Bot (Production)",
+        "message": f"Bybit Top-{TOP_COINS_COUNT} Bot active"
     }
-
-async def get_top_volume_symbols(exchange, limit=35):
-    """Автоматический отбор топ-линеек USDT-фьючерсов по суточному объему (исключаем мусор)"""
-    try:
-        await exchange.load_markets()
-        tickers = await exchange.fetch_tickers()
-        
-        valid_pairs = []
-        for symbol, ticker in tickers.items():
-            if '/USDT:USDT' in symbol and ticker.get('quoteVolume') is not None:
-                valid_pairs.append((symbol, ticker['quoteVolume']))
-        
-        valid_pairs.sort(key=lambda x: x[1], reverse=True)
-        top_symbols = [pair[0] for pair in valid_pairs[:limit]]
-        logger.info(f"📊 Отобрано топ-{len(top_symbols)} ликвидных монет по объему.")
-        return top_symbols
-    except Exception as e:
-        logger.error(f"Ошибка при получении списка монет по объему: {e}")
-        return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"]
 
 async def analyze_market_and_signal():
     """
-    Цикл глубокого анализа и симуляции через прокси (если задан): 
-    Считывает 250 свечей (15м), рассчитывает EMA 200 и выдает сигнал.
+    Основной цикл сканирования рынка по EMA 200
     """
-    exchange_config = {
+    # Инициализация биржи с обходом ограничений через публичные заголовки
+    exchange = ccxt.bybit({
         'enableRateLimit': True,
-        'options': {'defaultType': 'swap'}
-    }
-    
-    # Если прокси указан, подключаем его к ccxt
-    if PROXY_URL:
-        exchange_config['proxy'] = PROXY_URL
-        logger.info(f"🌐 Используется прокси для подключения к Bybit.")
-
-    exchange = ccxt.bybit(exchange_config)
+        'options': {'defaultType': 'swap'},
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+    })
 
     try:
         while True:
-            logger.info("🔍 Запуск симуляции и сканирования топ-35 ликвидных активов...")
-            symbols = await get_top_volume_symbols(exchange, limit=TOP_COINS_COUNT)
-            
-            logger.info(f"🚀 Анализ {len(symbols)} монет по стратегии EMA 200 с симуляцией...")
+            logger.info("🔍 Сканирование топ-линеек USDT-фьючерсов...")
+            try:
+                await exchange.load_markets()
+                tickers = await exchange.fetch_tickers()
+                
+                valid_pairs = []
+                for symbol, ticker in tickers.items():
+                    if '/USDT:USDT' in symbol and ticker.get('quoteVolume') is not None:
+                        valid_pairs.append((symbol, ticker['quoteVolume']))
+                
+                valid_pairs.sort(key=lambda x: x[1], reverse=True)
+                symbols = [pair[0] for pair in valid_pairs[:TOP_COINS_COUNT]]
+                logger.info(f"📊 Успешно отобрано топ-{len(symbols)} монет.")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки рынков (возможно, блокировка сети): {e}")
+                await asyncio.sleep(60)
+                continue
 
             for symbol in symbols:
                 try:
@@ -114,7 +100,7 @@ async def analyze_market_and_signal():
                     
                     current_price = closes[-1]
                     
-                    # Проверка стабильности тренда на последних 5 свечах
+                    # Проверка тренда
                     recent_trend_valid = all(closes[i] > ema200 for i in range(-5, 0)) if current_price > ema200 else all(closes[i] < ema200 for i in range(-5, 0))
                     
                     if not recent_trend_valid:
@@ -125,23 +111,19 @@ async def analyze_market_and_signal():
                         sl_price = current_price * (1 - (STOP_LOSS_PCT / 100) / LEVERAGE)
                         
                         signal_text = (
-                            f"🟢 *ТОРГОВЫЙ СИГНАЛ (СИМУЛЯЦИЯ ПРОЙДЕНА)* 🟢\n"
+                            f"🟢 *ТОРГОВЫЙ СИГНАЛ EMA 200* 🟢\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"💎 *Направление:* `LONG (Покупка)`\n"
-                            f"📊 *Инструмент:* `{symbol}` (Топ по объему)\n"
+                            f"📊 *Инструмент:* `{symbol}`\n"
                             f"⚡ *Плечо:* `{LEVERAGE}x` | ⏱ *Таймфрейм:* `{TIMEFRAME}`\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"💰 *Цена входа:* `{current_price}`\n"
-                            f"📈 *EMA 200 (250 свечей):* `{ema200:.4f}`\n"
+                            f"📈 *EMA 200:* `{ema200:.4f}`\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"🎯 *Тейк-Профит (+{TAKE_PROFIT_PCT}%):* `{tp_price:.4f}`\n"
                             f"🛑 *Стоп-Лосс (-{STOP_LOSS_PCT}%):* `{sl_price:.4f}`\n"
-                            f"🔄 *Умный Трейлинг-Стоп:* активация с `+{TRAILING_ACTIVATION}%` (шаг `{TRAILING_STEP}%`)\n"
-                            f"⚖️ *Соотношение риска:* `3:1`\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"💡 *Симуляция подтвердила тренд. Заходите вручную!*"
+                            f"⚖️ *Соотношение риска:* `3:1`"
                         )
-                        logger.info(f"Отправка LONG сигнала для {symbol}")
                         await send_telegram_alert(signal_text)
                         
                     elif current_price < ema200 * 0.999:  # SHORT
@@ -149,50 +131,37 @@ async def analyze_market_and_signal():
                         sl_price = current_price * (1 + (STOP_LOSS_PCT / 100) / LEVERAGE)
                         
                         signal_text = (
-                            f"🔴 *ТОРГОВЫЙ СИГНАЛ (СИМУЛЯЦИЯ ПРОЙДЕНА)* 🔴\n"
+                            f"🔴 *ТОРГОВЫЙ СИГНАЛ EMA 200* 🔴\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"📉 *Направление:* `SHORT (Продажа)`\n"
-                            f"📊 *Инструмент:* `{symbol}` (Топ по объему)\n"
+                            f"📊 *Инструмент:* `{symbol}`\n"
                             f"⚡ *Плечо:* `{LEVERAGE}x` | ⏱ *Таймфрейм:* `{TIMEFRAME}`\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"💰 *Цена входа:* `{current_price}`\n"
-                            f"📉 *EMA 200 (250 свечей):* `{ema200:.4f}`\n"
+                            f"📉 *EMA 200:* `{ema200:.4f}`\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎯 *Тейк-Профит (+{TAKE_PROFIT_PCT}%):* `{tp_price:.4f}`\n"
-                            f"🛑 *Стоп-Лосс (-{STOP_LOSS_PCT}%):* `{sl_price:.4f}`\n"
-                            f"🔄 *Умный Трейлинг-Стоп:* активация с `+{TRAILING_ACTIVATION}%` (шаг `{TRAILING_STEP}%`)\n"
-                            f"⚖️ *Соотношение риска:* `3:1`\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"💡 *Симуляция подтвердила тренд. Заходите вручную!*"
+                            f"🎯 *Тейк-Профит (-{TAKE_PROFIT_PCT}%):* `{tp_price:.4f}`\n"
+                            f"🛑 *Стоп-Лосс (+{STOP_LOSS_PCT}%):* `{sl_price:.4f}`\n"
+                            f"⚖️ *Соотношение риска:* `3:1`"
                         )
-                        logger.info(f"Отправка SHORT сигнала для {symbol}")
                         await send_telegram_alert(signal_text)
                         
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
 
                 except Exception as ex:
-                    logger.error(f"Ошибка при анализе {symbol}: {ex}")
+                    logger.error(f"Ошибка по монете {symbol}: {ex}")
 
-            # Пауза между циклами сканирования (3 минуты)
+            # Пауза перед следующим циклом сканирования (3 минуты)
             await asyncio.sleep(180)
 
     except Exception as e:
-        logger.error(f"Критическая ошибка в цикле биржи: {e}")
+        logger.error(f"Критическая ошибка цикла: {e}")
     finally:
         await exchange.close()
 
 @app.on_event("startup")
 async def startup_event():
-    startup_message = (
-        f"🤖 *Бот успешно запущен на Render (через прокси-модуль)!*\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *Стратегия:* EMA 200 (Топ-{TOP_COINS_COUNT} монет)\n"
-        f"⏱ *Таймфрейм:* `{TIMEFRAME}` | *Плечо:* `{LEVERAGE}x`\n"
-        f"🎯 *Цели:* ТП `+{TAKE_PROFIT_PCT}%` / СЛ `-{STOP_LOSS_PCT}%` (3:1)\n"
-        f"🚀 *Статус:* Ожидание связи с биржей..."
-    )
-    await send_telegram_alert(startup_message)
-    
+    await send_telegram_alert("🤖 *Бот успешно перезапущен и начал сканирование рынка!*")
     asyncio.create_task(analyze_market_and_signal())
 
 if __name__ == "__main__":

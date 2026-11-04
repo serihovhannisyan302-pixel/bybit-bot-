@@ -1,1 +1,6 @@
-urllib3
+ccxt
+fastapi
+uvicorn
+pandas
+numpy
+aiohttp

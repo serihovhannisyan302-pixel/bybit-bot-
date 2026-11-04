@@ -16,6 +16,10 @@ app = FastAPI()
 TELEGRAM_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
 CHAT_ID = "6264127581"
 
+# Настройки прокси (если используете прокси для обхода блокировки Render)
+# Пример: "http://proxy_ip:proxy_port" или оставьте пустым, если нашли другой способ
+PROXY_URL = os.environ.get("PROXY_URL", None) 
+
 # Параметры вашей стратегии и симуляции
 LEVERAGE = 10
 TAKE_PROFIT_PCT = 45.0  # Цель по движению цены (+45%)
@@ -47,7 +51,7 @@ async def send_telegram_alert(message: str):
 async def root():
     return {
         "status": "running", 
-        "mode": "Advanced Signal Generator with Trailing & Simulation",
+        "mode": "Advanced Signal Generator with Proxy & Simulation",
         "message": f"Bybit Top-{TOP_COINS_COUNT} EMA 200 Bot active | {LEVERAGE}x Leverage"
     }
 
@@ -72,14 +76,20 @@ async def get_top_volume_symbols(exchange, limit=35):
 
 async def analyze_market_and_signal():
     """
-    Цикл глубокого анализа и симуляции: 
-    Считывает 250 свечей (15м), рассчитывает EMA 200, 
-    оценивает волатильность и выдает профессиональный сигнал.
+    Цикл глубокого анализа и симуляции через прокси (если задан): 
+    Считывает 250 свечей (15м), рассчитывает EMA 200 и выдает сигнал.
     """
-    exchange = ccxt.bybit({
+    exchange_config = {
         'enableRateLimit': True,
         'options': {'defaultType': 'swap'}
-    })
+    }
+    
+    # Если прокси указан, подключаем его к ccxt
+    if PROXY_URL:
+        exchange_config['proxy'] = PROXY_URL
+        logger.info(f"🌐 Используется прокси для подключения к Bybit.")
+
+    exchange = ccxt.bybit(exchange_config)
 
     try:
         while True:
@@ -173,18 +183,16 @@ async def analyze_market_and_signal():
 
 @app.on_event("startup")
 async def startup_event():
-    # Отправляем уведомление в Telegram о том, что бот запущен
     startup_message = (
-        f"🤖 *Бот успешно запущен на Render!*\n"
+        f"🤖 *Бот успешно запущен на Render (через прокси-модуль)!*\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📊 *Стратегия:* EMA 200 (Топ-{TOP_COINS_COUNT} монет)\n"
         f"⏱ *Таймфрейм:* `{TIMEFRAME}` | *Плечо:* `{LEVERAGE}x`\n"
         f"🎯 *Цели:* ТП `+{TAKE_PROFIT_PCT}%` / СЛ `-{STOP_LOSS_PCT}%` (3:1)\n"
-        f"🚀 *Статус:* Сканирование рынка началось..."
+        f"🚀 *Статус:* Ожидание связи с биржей..."
     )
     await send_telegram_alert(startup_message)
     
-    # Запуск фонового процесса сканирования
     asyncio.create_task(analyze_market_and_signal())
 
 if __name__ == "__main__":

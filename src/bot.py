@@ -20,14 +20,14 @@ CHAT_ID = "6264127581"
 LEVERAGE = 10
 TAKE_PROFIT_PCT = 45.0  # Цель по движению цены (+45%)
 STOP_LOSS_PCT = 15.0    # Базовый стоп-лосс (-15%)
-TRAILING_ACTIVATION = 15.0  # Активация трейлинг-стопа после +15% движения в вашу сторону
+TRAILING_ACTIVATION = 15.0  # Активация трейлинг-стопа после +15% движения
 TRAILING_STEP = 5.0         # Шаг подтягивания трейлинга (5%)
 TIMEFRAME = '15m'
 CANDLE_LIMIT = 250      # Глубокий анализ истории (250 свечей)
 TOP_COINS_COUNT = 35    # Топ-35 монет по объему (без "мусора")
 
 async def send_telegram_alert(message: str):
-    """Отправка подробного сигнала с симуляцией и уровнями трейлинга в Telegram"""
+    """Отправка сообщения в Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -74,7 +74,7 @@ async def analyze_market_and_signal():
     """
     Цикл глубокого анализа и симуляции: 
     Считывает 250 свечей (15м), рассчитывает EMA 200, 
-    оценивает волатильность для трейлинга и выдает профессиональный сигнал.
+    оценивает волатильность и выдает профессиональный сигнал.
     """
     exchange = ccxt.bybit({
         'enableRateLimit': True,
@@ -90,14 +90,11 @@ async def analyze_market_and_signal():
 
             for symbol in symbols:
                 try:
-                    # Загружаем 250 свечей на 15-минутном таймфрейме для симуляции
                     ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=CANDLE_LIMIT)
                     if len(ohlcv) < 200:
                         continue
                     
                     closes = [candle[4] for candle in ohlcv]
-                    highs = [candle[2] for candle in ohlcv]
-                    lows = [candle[3] for candle in ohlcv]
                     
                     # Расчет EMA 200
                     k = 2 / (200 + 1)
@@ -107,19 +104,15 @@ async def analyze_market_and_signal():
                     
                     current_price = closes[-1]
                     
-                    # ---- БЛОК СИМУЛЯЦИИ И ОЦЕНКИ ИСТОРИИ ----
-                    # Проверяем, как вела себя цена на последних свечах относительно EMA 200
-                    # Симуляция подтверждает стабильность тренда перед выдачей сигнала
+                    # Проверка стабильности тренда на последних 5 свечах
                     recent_trend_valid = all(closes[i] > ema200 for i in range(-5, 0)) if current_price > ema200 else all(closes[i] < ema200 for i in range(-5, 0))
                     
                     if not recent_trend_valid:
-                        continue # Пропускаем монету, если тренд нестабилен (симуляция отсекала ложняк)
+                        continue 
 
-                    # Условия для генерации сигнала
-                    if current_price > ema200 * 1.001:  # Тренд вверх -> LONG
+                    if current_price > ema200 * 1.001:  # LONG
                         tp_price = current_price * (1 + (TAKE_PROFIT_PCT / 100) / LEVERAGE)
                         sl_price = current_price * (1 - (STOP_LOSS_PCT / 100) / LEVERAGE)
-                        trailing_activation_price = current_price * (1 + (TRAILING_ACTIVATION / 100) / LEVERAGE)
                         
                         signal_text = (
                             f"🟢 *ТОРГОВЫЙ СИГНАЛ (СИМУЛЯЦИЯ ПРОЙДЕНА)* 🟢\n"
@@ -141,10 +134,9 @@ async def analyze_market_and_signal():
                         logger.info(f"Отправка LONG сигнала для {symbol}")
                         await send_telegram_alert(signal_text)
                         
-                    elif current_price < ema200 * 0.999:  # Тренд вниз -> SHORT
+                    elif current_price < ema200 * 0.999:  # SHORT
                         tp_price = current_price * (1 - (TAKE_PROFIT_PCT / 100) / LEVERAGE)
                         sl_price = current_price * (1 + (STOP_LOSS_PCT / 100) / LEVERAGE)
-                        trailing_activation_price = current_price * (1 - (TRAILING_ACTIVATION / 100) / LEVERAGE)
                         
                         signal_text = (
                             f"🔴 *ТОРГОВЫЙ СИГНАЛ (СИМУЛЯЦИЯ ПРОЙДЕНА)* 🔴\n"
@@ -171,7 +163,7 @@ async def analyze_market_and_signal():
                 except Exception as ex:
                     logger.error(f"Ошибка при анализе {symbol}: {ex}")
 
-            # Пауза между сканированиями рынка (3 минуты)
+            # Пауза между циклами сканирования (3 минуты)
             await asyncio.sleep(180)
 
     except Exception as e:
@@ -181,6 +173,18 @@ async def analyze_market_and_signal():
 
 @app.on_event("startup")
 async def startup_event():
+    # Отправляем уведомление в Telegram о том, что бот запущен
+    startup_message = (
+        f"🤖 *Бот успешно запущен на Render!*\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *Стратегия:* EMA 200 (Топ-{TOP_COINS_COUNT} монет)\n"
+        f"⏱ *Таймфрейм:* `{TIMEFRAME}` | *Плечо:* `{LEVERAGE}x`\n"
+        f"🎯 *Цели:* ТП `+{TAKE_PROFIT_PCT}%` / СЛ `-{STOP_LOSS_PCT}%` (3:1)\n"
+        f"🚀 *Статус:* Сканирование рынка началось..."
+    )
+    await send_telegram_alert(startup_message)
+    
+    # Запуск фонового процесса сканирования
     asyncio.create_task(analyze_market_and_signal())
 
 if __name__ == "__main__":

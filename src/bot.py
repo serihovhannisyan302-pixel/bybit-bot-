@@ -13,11 +13,11 @@ TELEGRAM_CHAT_ID = "6264127581"
 LEVERAGE = 10         
 RISK_REWARD_RATIO = 3 
 EMA_PERIOD = 200      
-INTERVAL = "15"       # Изменено на 15 минут для качественных трендовых сигналов
+INTERVAL = "15"       # Таймфрейм 15 минут
 TOP_LIMIT = 35        
 # ============================================================
 
-# 1. Легковесный HTTP-сервер для Render
+# 1. Легковесный HTTP-сервер для Render (защита от засыпания)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -87,15 +87,31 @@ def calculate_ema(data, period):
     return ema
 
 def main():
-    print("Бот запущен на 15m таймфрейме!")
-    send_telegram_message("🚀 *EMA 200 Bot (15m) запущен на Render!* Сканируем топ трендовых монет.")
+    print("Бот успешно запущен на 15m таймфрейме и начал сканирование рынка...")
+    
+    start_msg = (
+        f"💎 **EMA 200 TRADING SYSTEM** 🚀\n"
+        f"═══════════════════════\n"
+        f"⚡ **Статус:** `Активен (Live)`\n"
+        f"⏱ **Таймфрейм:** `15m`\n"
+        f"🎯 **Цель:** TP `+45%` | SL `-15%`\n"
+        f"🔥 **Сканер:** Топ-{TOP_LIMIT} монет по объему\n"
+        f"═══════════════════════"
+    )
+    send_telegram_message(start_msg)
+
+    last_signal_time = {}
+    COOLDOWN_TIME = 3600  # 1 час паузы по монете
 
     while True:
         try:
             symbols = get_top_trending_symbols(TOP_LIMIT)
             if not symbols:
+                print("Не удалось получить список монет, повтор через 30 секунд...")
                 time.sleep(30)
                 continue
+
+            current_time = time.time()
 
             for symbol in symbols:
                 closes = get_klines(symbol, INTERVAL, limit=250)
@@ -106,16 +122,59 @@ def main():
                 current_price = closes[-1]
                 prev_price = closes[-2]
 
+                last_sent = last_signal_time.get(symbol, 0)
+                if current_time - last_sent < COOLDOWN_TIME:
+                    time.sleep(0.5)
+                    continue
+
+                # Расчет уровней для LONG
                 if prev_price <= ema_200 and current_price > ema_200:
-                    msg = f"🟢 *LONG (15m)* | `{symbol}`\nЦена: `{current_price}`\nEMA 200: `{round(ema_200, 4)}`\nПлечо: `{LEVERAGE}x` (3:1)"
+                    tp_price = current_price * 1.045
+                    sl_price = current_price * 0.985
+                    
+                    msg = (
+                        f"🟢 **NEW LONG SIGNAL // BYBIT** 📈\n"
+                        f"═══════════════════════\n"
+                        f"🔹 **Монета:** `{symbol}`\n"
+                        f"📍 **Точка входа:** `{current_price}`\n"
+                        f"📊 **Индикатор EMA 200:** `{round(ema_200, 4)}`\n"
+                        f"═══════════════════════\n"
+                        f"🎯 **TAKE PROFIT (+45%):** `✨ {round(tp_price, 4)}`\n"
+                        f"🛑 **STOP LOSS (-15%):** `🛡 {round(sl_price, 4)}`\n"
+                        f"═══════════════════════\n"
+                        f"⚡ **Плечо:** `{LEVERAGE}x` | 🎯 **R/R:** `{RISK_REWARD_RATIO}:1`\n"
+                        f"⏰ **Таймфрейм:** `15m`"
+                    )
                     send_telegram_message(msg)
+                    last_signal_time[symbol] = current_time
+                    print(f"Отправлен LONG сигнал по монете: {symbol}")
+
+                # Расчет уровней для SHORT
                 elif prev_price >= ema_200 and current_price < ema_200:
-                    msg = f"🔴 *SHORT (15m)* | `{symbol}`\nЦена: `{current_price}`\nEMA 200: `{round(ema_200, 4)}`\nПлечо: `{LEVERAGE}x` (3:1)"
+                    tp_price = current_price * 0.955
+                    sl_price = current_price * 1.015
+                    
+                    msg = (
+                        f"🔴 **NEW SHORT SIGNAL // BYBIT** 📉\n"
+                        f"═══════════════════════\n"
+                        f"🔹 **Монета:** `{symbol}`\n"
+                        f"📍 **Точка входа:** `{current_price}`\n"
+                        f"📊 **Индикатор EMA 200:** `{round(ema_200, 4)}`\n"
+                        f"═══════════════════════\n"
+                        f"🎯 **TAKE PROFIT (+45%):** `✨ {round(tp_price, 4)}`\n"
+                        f"🛑 **STOP LOSS (-15%):** `🛡 {round(sl_price, 4)}`\n"
+                        f"═══════════════════════\n"
+                        f"⚡ **Плечо:** `{LEVERAGE}x` | 🎯 **R/R:** `{RISK_REWARD_RATIO}:1`\n"
+                        f"⏰ **Таймфрейм:** `15m`"
+                    )
                     send_telegram_message(msg)
+                    last_signal_time[symbol] = current_time
+                    print(f"Отправлен SHORT сигнал по монете: {symbol}")
 
                 time.sleep(1)
 
             time.sleep(120)
+
         except Exception as e:
             print(f"Loop error: {e}")
             time.sleep(60)

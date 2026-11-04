@@ -21,8 +21,9 @@ LEVERAGE = 10
 TAKE_PROFIT_PCT = 45.0  
 STOP_LOSS_PCT = 15.0    
 CANDLE_LIMIT = 250      
-TOP_COINS_COUNT = 35    
-MAX_SIGNALS_PER_CYCLE = 1  # Строго 1 лучший сигнал за проход
+TOP_COINS_COUNT = 50    # Расширено до топ-50 для частых входов
+MIN_WIN_RATE = 38.0     # Оптимизированный порог (38%) для достижения 3-4 сигналов в день
+MAX_SIGNALS_PER_CYCLE = 2  # До 2 лучших сигналов за проход
 
 # Реестр для защиты от спама
 sent_signals = set()
@@ -127,7 +128,7 @@ async def analyze_market_and_signal():
 
     try:
         while True:
-            logger.info("🔄 Сканирование рынка в поисках абсолютного лидера...")
+            logger.info("🔄 Сканирование рынка в поисках лидеров...")
             try:
                 await exchange.load_markets()
                 tickers = await exchange.fetch_tickers()
@@ -183,11 +184,11 @@ async def analyze_market_and_signal():
                         sent_signals.add(symbol)
                         continue
 
-                    # Прогон симуляция 500 сделок
+                    # Прогон симуляции 500 сделок
                     win_rate = simulate_trade_probability(ohlcv_15m, direction)
                     
-                    # Порог качества (Win-Rate не ниже 42% для достижения +45% профита)
-                    if win_rate >= 42.0:
+                    # Порог качества (Win-Rate не ниже 38.0% для достижения цели)
+                    if win_rate >= MIN_WIN_RATE:
                         cycle_candidates.append({
                             'symbol': symbol,
                             'direction': direction,
@@ -206,7 +207,7 @@ async def analyze_market_and_signal():
                 await asyncio.sleep(180)
                 continue
 
-            # Сортируем кандидатов по самому высокому Win-Rate (берем строго 1 лидера)
+            # Сортируем кандидатов по самому высокому Win-Rate
             cycle_candidates.sort(key=lambda x: x['win_rate'], reverse=True)
 
             sent_count = 0
@@ -223,7 +224,7 @@ async def analyze_market_and_signal():
                         sl_price = current_price * (1 - (STOP_LOSS_PCT / 100) / LEVERAGE)
                         
                         signal_text = (
-                            f"🟢 *ЛУЧШИЙ СИГНАЛ (Win-Rate цели +45%: {win_rate:.1f}%)* 🟢\n"
+                            f"🟢 *ТОРГОВЫЙ СИГНАЛ (Win-Rate: {win_rate:.1f}%)* 🟢\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"💎 *Направление:* `LONG (Покупка)`\n"
                             f"📊 *Инструмент:* `{symbol}`\n"
@@ -245,7 +246,7 @@ async def analyze_market_and_signal():
                         sl_price = current_price * (1 + (STOP_LOSS_PCT / 100) / LEVERAGE)
                         
                         signal_text = (
-                            f"🔴 *ЛУЧШИЙ СИГНАЛ (Win-Rate цели +45%: {win_rate:.1f}%)* 🔴\n"
+                            f"🔴 *ТОРГОВЫЙ СИГНАЛ (Win-Rate: {win_rate:.1f}%)* 🔴\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"📉 *Направление:* `SHORT (Продажа)`\n"
                             f"📊 *Инструмент:* `{symbol}`\n"
@@ -262,7 +263,7 @@ async def analyze_market_and_signal():
                         sent_signals.add(symbol)
                         sent_count += 1
 
-            logger.info(f"💤 Цикл завершен. Отправлен 1 лучший сигнал. Пауза 3 минуты.")
+            logger.info(f"💤 Цикл завершен. Отправлено сигналов: {sent_count}. Пауза 3 минуты.")
             await asyncio.sleep(180)
 
     except Exception as e:

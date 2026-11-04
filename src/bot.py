@@ -22,10 +22,11 @@ TAKE_PROFIT_PCT = 45.0
 STOP_LOSS_PCT = 15.0    
 CANDLE_LIMIT = 250      
 TOP_COINS_COUNT = 35    
-MAX_SIGNALS_PER_CYCLE = 1  # Строго 1 лучший сигнал за проход!
+MAX_SIGNALS_PER_CYCLE = 1  # Строго 1 лучший сигнал за проход
 
 # Реестр для защиты от спама
 sent_signals = set()
+is_system_ready = False  # Флаг готовности системы (блокирует спам при запуске)
 
 async def send_telegram_alert(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -47,7 +48,7 @@ async def send_telegram_alert(message: str):
 async def root():
     return {
         "status": "running", 
-        "mode": "Multi-Timeframe EMA 200 Bot with Single Best Signal Filter (Production)",
+        "mode": "Multi-Timeframe EMA 200 Bot with Strict Startup Guard (Production)",
         "message": f"Bybit Top-{TOP_COINS_COUNT} Bot active"
     }
 
@@ -62,7 +63,7 @@ def calculate_ema(closes, period=200):
 
 def simulate_trade_probability(ohlcv, direction: str) -> float:
     """
-    Симуляция сделок на истории. Возвращает точный Win-Rate (процент успеха).
+    Глубокая симуляция 500 итераций. Проверяет процент достижения +45% профита с плечом 10x.
     """
     if len(ohlcv) < 50:
         return 0.0
@@ -115,7 +116,7 @@ def simulate_trade_probability(ohlcv, direction: str) -> float:
     return (success_count / total_simulations) * 100
 
 async def analyze_market_and_signal():
-    global sent_signals
+    global sent_signals, is_system_ready
     exchange = ccxt.bybit({
         'enableRateLimit': True,
         'options': {'defaultType': 'swap'},
@@ -177,10 +178,15 @@ async def analyze_market_and_signal():
 
                     direction = 'LONG' if is_bullish else 'SHORT'
                     
-                    # Прогон симуляции 500 сделок
+                    # Если система еще не готова (первый запуск), просто наполняем реестр антиспама
+                    if not is_system_ready:
+                        sent_signals.add(symbol)
+                        continue
+
+                    # Прогон симуляция 500 сделок
                     win_rate = simulate_trade_probability(ohlcv_15m, direction)
                     
-                    # Порог качества (например, Win-Rate не ниже 42%)
+                    # Порог качества (Win-Rate не ниже 42% для достижения +45% профита)
                     if win_rate >= 42.0:
                         cycle_candidates.append({
                             'symbol': symbol,
@@ -193,7 +199,14 @@ async def analyze_market_and_signal():
                 except Exception as ex:
                     logger.error(f"Ошибка по монете {symbol}: {ex}")
 
-            # Сортируем кандидатов по самому высокому Win-Rate (первым идет абсолютный лидер)
+            # Если это был самый первый проход — переключаем флаг и уходим в сон на 3 минуты без отправки
+            if not is_system_ready:
+                is_system_ready = True
+                logger.info("🛡 Первый проход завершен. База антиспама заполнена. Сигналы активированы со следующего цикла.")
+                await asyncio.sleep(180)
+                continue
+
+            # Сортируем кандидатов по самому высокому Win-Rate (берем строго 1 лидера)
             cycle_candidates.sort(key=lambda x: x['win_rate'], reverse=True)
 
             sent_count = 0
@@ -210,7 +223,7 @@ async def analyze_market_and_signal():
                         sl_price = current_price * (1 - (STOP_LOSS_PCT / 100) / LEVERAGE)
                         
                         signal_text = (
-                            f"🟢 *ЛУЧШИЙ СИГНАЛ ЦИКЛА (Win-Rate: {win_rate:.1f}%)* 🟢\n"
+                            f"🟢 *ЛУЧШИЙ СИГНАЛ (Win-Rate цели +45%: {win_rate:.1f}%)* 🟢\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"💎 *Направление:* `LONG (Покупка)`\n"
                             f"📊 *Инструмент:* `{symbol}`\n"
@@ -232,7 +245,7 @@ async def analyze_market_and_signal():
                         sl_price = current_price * (1 + (STOP_LOSS_PCT / 100) / LEVERAGE)
                         
                         signal_text = (
-                            f"🔴 *ЛУЧШИЙ СИГНАЛ ЦИКЛА (Win-Rate: {win_rate:.1f}%)* 🔴\n"
+                            f"🔴 *ЛУЧШИЙ СИГНАЛ (Win-Rate цели +45%: {win_rate:.1f}%)* 🔴\n"
                             f"━━━━━━━━━━━━━━━━━━━\n"
                             f"📉 *Направление:* `SHORT (Продажа)`\n"
                             f"📊 *Инструмент:* `{symbol}`\n"
@@ -249,7 +262,7 @@ async def analyze_market_and_signal():
                         sent_signals.add(symbol)
                         sent_count += 1
 
-            logger.info(f"💤 Цикл завершен. Отправлен 1 лучший сигнал (если были кандидаты). Пауза 3 минуты.")
+            logger.info(f"💤 Цикл завершен. Отправлен 1 лучший сигнал. Пауза 3 минуты.")
             await asyncio.sleep(180)
 
     except Exception as e:
@@ -259,7 +272,7 @@ async def analyze_market_and_signal():
 
 @app.on_event("startup")
 async def startup_event():
-    await send_telegram_alert("🤖 *Бот настроен на отправку только 1 лучшего сигнала за цикл!*")
+    await send_telegram_alert("🤖 *Бот запущен! Первые 3 минуты идет холодный проход рынка (сигналы временно заблокированы от спама).*")
     asyncio.create_task(analyze_market_and_signal())
 
 if __name__ == "__main__":

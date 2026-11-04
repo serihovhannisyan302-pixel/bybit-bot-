@@ -1,6 +1,0 @@
-ccxt
-fastapi
-uvicorn
-pandas
-numpy
-aiohttp

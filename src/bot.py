@@ -14,13 +14,13 @@ app = FastAPI()
 TELEGRAM_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
 CHAT_ID = "6264127581"
 
-VIRTUAL_BALANCE = 100.0  
+VIRTUAL_BALANCE = 90.0  # С учетом текущего депозита
 LEVERAGE = 15          # Плечо 15x
 TAKE_PROFIT_PCT = 50.0 # Тейк-профит 50% к марже (3.33% цены)
 STOP_LOSS_PCT = 20.0   # Стоп-лосс 20% к марже (1.33% цены)
 CANDLE_LIMIT = 250      
 TOP_COINS_COUNT = 50    
-MIN_WIN_RATE = 38.0     
+MIN_WIN_RATE = 42.0     # Чуть подняли планку винрейта для фильтрации шума
 
 active_positions = []
 sent_signals = set()
@@ -41,7 +41,7 @@ async def send_telegram_alert(message: str):
 async def root():
     return {
         "status": "running",
-        "mode": "Optimized Pullback Paper Trader (Strategy 50:20 / 15x)",
+        "mode": "Optimized Pullback Paper Trader (Filtered Strategy 50:20 / 15x)",
         "virtual_balance": VIRTUAL_BALANCE,
         "active_positions_count": len(active_positions)
     }
@@ -54,6 +54,18 @@ def calculate_ema(closes, period=200):
     for price in closes[period:]:
         ema = (price * k) + (ema * (1 - k))
     return ema
+
+def calculate_atr(ohlcv, period=14):
+    if len(ohlcv) < period + 1:
+        return 0.0
+    tr_list = []
+    for i in range(1, len(ohlcv)):
+        high = ohlcv[i][2]
+        low = ohlcv[i][3]
+        prev_close = ohlcv[i-1][4]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_list.append(tr)
+    return sum(tr_list[-period:]) / period
 
 def simulate_trade_probability(ohlcv, direction: str) -> float:
     if len(ohlcv) < 50:
@@ -107,7 +119,7 @@ async def monitor_and_trade_loop():
 
     try:
         while True:
-            logger.info("🔄 Сканирование рынка (Стратегия 50:20)...")
+            logger.info("🔄 Сканирование рынка (фильтрованная стратегия 50:20)...")
             try:
                 await exchange.load_markets()
                 tickers = await exchange.fetch_tickers()
@@ -157,7 +169,7 @@ async def monitor_and_trade_loop():
                 except Exception as ex:
                     logger.error(f"Error checking position {pos['symbol']}: {ex}")
 
-            # 2. Поиск новых точек входа
+            # 2. Поиск новых точек входа с фильтрами
             cycle_candidates = []
             for symbol in symbols:
                 if any(p['symbol'] == symbol for p in active_positions) or symbol in sent_signals:
@@ -181,14 +193,25 @@ async def monitor_and_trade_loop():
                     if not ema_5m or not ema_1h or not ema_4h:
                         continue
                     
-                    current_price = closes_5m[-1]
+                    # ИСПОЛЬЗУЕМ ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЕМ ПРОШЛОЙ СВЕЧИ (индекс -2)
+                    closed_candle = ohlcv_5m[-2]
+                    prev_open, prev_high, prev_low, prev_close = closed_candle[1], closed_candle[2], closed_candle[3], closed_candle[4]
                     
-                    ema_distance_pct = abs((current_price - ema_5m) / ema_5m) * 100
+                    current_price = closes_5m[-1]
+                    ema_distance_pct = abs((prev_close - ema_5m) / ema_5m) * 100
+                    
+                    # Фильтр расстояния от EMA 200
                     if ema_distance_pct < 0.4 or ema_distance_pct > 2.2:
                         continue 
 
-                    is_bullish = (current_price > ema_5m) and (closes_1h[-1] > ema_1h) and (closes_4h[-1] > ema_4h)
-                    is_bearish = (current_price < ema_5m) and (closes_1h[-1] < ema_1h) and (closes_4h[-1] < ema_4h)
+                    # Фильтр минимального размера тела свечи (ATR-фильтр)
+                    candle_body = abs(prev_close - prev_open)
+                    avg_atr = calculate_atr(ohlcv_5m, 14)
+                    if avg_atr > 0 and candle_body < (avg_atr * 0.35):
+                        continue # Отсекаем мелкие свечи-«доджи» во флете
+
+                    is_bullish = (prev_close > ema_5m) and (closes_1h[-1] > ema_1h) and (closes_4h[-1] > ema_4h)
+                    is_bearish = (prev_close < ema_5m) and (closes_1h[-1] < ema_1h) and (closes_4h[-1] < ema_4h)
 
                     if not is_bullish and not is_bearish:
                         continue 
@@ -211,13 +234,13 @@ async def monitor_and_trade_loop():
 
             if not is_system_ready:
                 is_system_ready = True
-                logger.info("🛡 Бот активирован: стратегия 50:20!")
+                logger.info("🛡 Бот активирован с фильтрами шума!")
                 await asyncio.sleep(120)
                 continue
 
             cycle_candidates.sort(key=lambda x: x['win_rate'], reverse=True)
 
-            # Открытие всех подходящих сделок без ограничений
+            # Открытие подходящих сделок
             for best in cycle_candidates:
                 margin = VIRTUAL_BALANCE * 0.10  
                 
@@ -241,7 +264,7 @@ async def monitor_and_trade_loop():
                 sent_signals.add(best['symbol'])
 
                 msg = (
-                    f"🎯 *ВИРТУАЛЬНАЯ СДЕЛКА ОТКРЫТА*\n"
+                    f"🎯 *ВИРТУАЛЬНАЯ СДЕЛКА (С ФИЛЬТРОМ)*\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
                     f"📊 Монета: `{best['symbol']}` | Направление: **{best['direction']}**\n"
                     f"📈 Win-Rate: `{best['win_rate']:.1f}%` | Отрыв EMA: `{best['distance']:.2f}%`\n"
@@ -263,7 +286,7 @@ async def monitor_and_trade_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    await send_telegram_alert("🚀 *Бот обновлен: установлена оптимальная стратегия 50:20 (Плечо 15x, R:R 2.5:1)!*")
+    await send_telegram_alert("🚀 *Бот обновлен: внедрены фильтры подтверждения телом свечи и ATR для защиты от флета!*")
     asyncio.create_task(monitor_and_trade_loop())
 
 if __name__ == "__main__":

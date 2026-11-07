@@ -1,294 +1,133 @@
 import os
-import asyncio
-import logging
-from fastapi import FastAPI
-import uvicorn
-import ccxt.async_support as ccxt
-import aiohttp
+import time
+import requests
+import ccxt
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("bybit_paper_trader")
+# 1. Загрузка параметров и ключей из переменных окружения
+API_KEY = os.getenv('BYBIT_API_KEY')
+API_SECRET = os.getenv('BYBIT_SECRET')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-app = FastAPI()
+SYMBOL = 'ZEC/USDT'
+TIMEFRAME = '15m'
+LEVERAGE = 5
+POSITION_SIZE_USD = 10  # Маржа $10 (объем с плечом $50)
+STOP_LOSS_PCT = 0.018   # Стоп-лосс 1.8%
+TP1_PCT = 0.03          # Тейк-профит 3%
 
-TELEGRAM_TOKEN = "9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw"
-CHAT_ID = "6264127581"
+# Инициализация подключения к Bybit (Futures / Unified)
+exchange = ccxt.bybit({
+    'apiKey': API_KEY,
+    'secret': API_SECRET,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'linear'}
+})
 
-VIRTUAL_BALANCE = 90.0  # С учетом текущего депозита
-LEVERAGE = 15          # Плечо 15x
-TAKE_PROFIT_PCT = 50.0 # Тейк-профит 50% к марже (3.33% цены)
-STOP_LOSS_PCT = 20.0   # Стоп-лосс 20% к марже (1.33% цены)
-CANDLE_LIMIT = 250      
-TOP_COINS_COUNT = 50    
-MIN_WIN_RATE = 42.0     # Чуть подняли планку винрейта для фильтрации шума
-
-active_positions = []
-sent_signals = set()
-is_system_ready = False
-
-async def send_telegram_alert(message: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    async with aiohttp.ClientSession() as session:
+def send_telegram(message):
+    """Отправка уведомлений в Telegram"""
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         try:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    logger.error(f"Telegram error: {await response.text()}")
+            requests.post(url, json=payload, timeout=5)
         except Exception as e:
-            logger.error(f"Telegram request error: {e}")
+            print(f"Ошибка отправки Telegram: {e}")
 
-@app.get("/")
-async def root():
-    return {
-        "status": "running",
-        "mode": "Optimized Pullback Paper Trader (Filtered Strategy 50:20 / 15x)",
-        "virtual_balance": VIRTUAL_BALANCE,
-        "active_positions_count": len(active_positions)
-    }
-
-def calculate_ema(closes, period=200):
-    if len(closes) < period:
-        return None
-    k = 2 / (period + 1)
-    ema = sum(closes[:period]) / period
-    for price in closes[period:]:
-        ema = (price * k) + (ema * (1 - k))
-    return ema
-
-def calculate_atr(ohlcv, period=14):
-    if len(ohlcv) < period + 1:
-        return 0.0
-    tr_list = []
-    for i in range(1, len(ohlcv)):
-        high = ohlcv[i][2]
-        low = ohlcv[i][3]
-        prev_close = ohlcv[i-1][4]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        tr_list.append(tr)
-    return sum(tr_list[-period:]) / period
-
-def simulate_trade_probability(ohlcv, direction: str) -> float:
-    if len(ohlcv) < 50:
-        return 0.0
-    recent_candles = ohlcv[-200:]
-    success_count = 0
-    total_simulations = 0
-
-    for start_idx in range(5, len(recent_candles) - 10):
-        if total_simulations >= 300:
-            break
-        entry = recent_candles[start_idx][4]
-        if direction == 'LONG':
-            tp = entry * (1 + (TAKE_PROFIT_PCT / 100) / LEVERAGE)
-            sl = entry * (1 - (STOP_LOSS_PCT / 100) / LEVERAGE)
-            hit_tp, hit_sl = False, False
-            for j in range(start_idx + 1, len(recent_candles)):
-                high, low = recent_candles[j][2], recent_candles[j][3]
-                if low <= sl:
-                    hit_sl = True
-                    break
-                if high >= tp:
-                    hit_tp = True
-                    break
-            if hit_tp and not hit_sl:
-                success_count += 1
-            total_simulations += 1
-        else:
-            tp = entry * (1 - (TAKE_PROFIT_PCT / 100) / LEVERAGE)
-            sl = entry * (1 + (STOP_LOSS_PCT / 100) / LEVERAGE)
-            hit_tp, hit_sl = False, False
-            for j in range(start_idx + 1, len(recent_candles)):
-                high, low = recent_candles[j][2], recent_candles[j][3]
-                if high >= sl:
-                    hit_sl = True
-                    break
-                if low <= tp:
-                    hit_tp = True
-                    break
-            if hit_tp and not hit_sl:
-                success_count += 1
-            total_simulations += 1
-
-    if total_simulations == 0:
-        return 0.0
-    return (success_count / total_simulations) * 100
-
-async def monitor_and_trade_loop():
-    global VIRTUAL_BALANCE, active_positions, sent_signals, is_system_ready
-    exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-
+def check_volume_breakout():
+    """Проверка всплеска объема 4x-5x на 15m timeframe"""
     try:
-        while True:
-            logger.info("🔄 Сканирование рынка (фильтрованная стратегия 50:20)...")
-            try:
-                await exchange.load_markets()
-                tickers = await exchange.fetch_tickers()
-                valid_pairs = []
-                for symbol, ticker in tickers.items():
-                    if '/USDT:USDT' in symbol and ticker.get('quoteVolume') is not None:
-                        valid_pairs.append((symbol, ticker['quoteVolume']))
-                valid_pairs.sort(key=lambda x: x[1], reverse=True)
-                symbols = [pair[0] for pair in valid_pairs[:TOP_COINS_COUNT]]
-            except Exception as e:
-                logger.error(f"Market data error: {e}")
-                await asyncio.sleep(60)
-                continue
-
-            # 1. Проверка активных виртуальных позиций
-            for pos in list(active_positions):
-                try:
-                    ticker = await exchange.fetch_ticker(pos['symbol'])
-                    curr_price = ticker['last']
-                    
-                    if pos['direction'] == 'LONG':
-                        if curr_price >= pos['tp']:
-                            profit = pos['margin'] * (TAKE_PROFIT_PCT / 100)
-                            VIRTUAL_BALANCE += profit
-                            active_positions.remove(pos)
-                            sent_signals.discard(pos['symbol'])
-                            await send_telegram_alert(f"🟢 *ВИРТУАЛЬНЫЙ ТЕЙК-ПРОФИТ (+50%)*\nМонета: `{pos['symbol']}`\n🎯 Выход по цели: `{pos['tp']:.4f}`\n💰 Прибыль: `+${profit:.2f}`\n💼 Баланс банка: **${VIRTUAL_BALANCE:.2f}**")
-                        elif curr_price <= pos['sl']:
-                            loss = pos['margin'] * (STOP_LOSS_PCT / 100)
-                            VIRTUAL_BALANCE -= loss
-                            active_positions.remove(pos)
-                            sent_signals.discard(pos['symbol'])
-                            await send_telegram_alert(f"🔴 *ВИРТУАЛЬНЫЙ СТОП-ЛОСС (-20%)*\nМонета: `{pos['symbol']}`\n🛡 Сработал стоп: `{pos['sl']:.4f}`\n💸 Убыток: `-${loss:.2f}`\n💼 Баланс банка: **${VIRTUAL_BALANCE:.2f}**")
-                    else:
-                        if curr_price <= pos['tp']:
-                            profit = pos['margin'] * (TAKE_PROFIT_PCT / 100)
-                            VIRTUAL_BALANCE += profit
-                            active_positions.remove(pos)
-                            sent_signals.discard(pos['symbol'])
-                            await send_telegram_alert(f"🟢 *ВИРТУАЛЬНЫЙ ТЕЙК-ПРОФИТ (+50%)*\nМонета: `{pos['symbol']}`\n🎯 Выход по цели: `{pos['tp']:.4f}`\n💰 Прибыль: `+${profit:.2f}`\n💼 Баланс банка: **${VIRTUAL_BALANCE:.2f}**")
-                        elif curr_price >= pos['sl']:
-                            loss = pos['margin'] * (STOP_LOSS_PCT / 100)
-                            VIRTUAL_BALANCE -= loss
-                            active_positions.remove(pos)
-                            sent_signals.discard(pos['symbol'])
-                            await send_telegram_alert(f"🔴 *ВИРТУАЛЬНЫЙ СТОП-ЛОСС (-20%)*\nМонета: `{pos['symbol']}`\n🛡 Сработал стоп: `{pos['sl']:.4f}`\n💸 Убыток: `-${loss:.2f}`\n💼 Баланс банка: **${VIRTUAL_BALANCE:.2f}**")
-                except Exception as ex:
-                    logger.error(f"Error checking position {pos['symbol']}: {ex}")
-
-            # 2. Поиск новых точек входа с фильтрами
-            cycle_candidates = []
-            for symbol in symbols:
-                if any(p['symbol'] == symbol for p in active_positions) or symbol in sent_signals:
-                    continue 
-                try:
-                    ohlcv_5m = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=CANDLE_LIMIT)
-                    ohlcv_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=200)
-                    ohlcv_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=200)
-
-                    if len(ohlcv_5m) < 200 or len(ohlcv_1h) < 200 or len(ohlcv_4h) < 200:
-                        continue
-                    
-                    closes_5m = [c[4] for c in ohlcv_5m]
-                    closes_1h = [c[4] for c in ohlcv_1h]
-                    closes_4h = [c[4] for c in ohlcv_4h]
-                    
-                    ema_5m = calculate_ema(closes_5m, 200)
-                    ema_1h = calculate_ema(closes_1h, 200)
-                    ema_4h = calculate_ema(closes_4h, 200)
-
-                    if not ema_5m or not ema_1h or not ema_4h:
-                        continue
-                    
-                    # ИСПОЛЬЗУЕМ ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЕМ ПРОШЛОЙ СВЕЧИ (индекс -2)
-                    closed_candle = ohlcv_5m[-2]
-                    prev_open, prev_high, prev_low, prev_close = closed_candle[1], closed_candle[2], closed_candle[3], closed_candle[4]
-                    
-                    current_price = closes_5m[-1]
-                    ema_distance_pct = abs((prev_close - ema_5m) / ema_5m) * 100
-                    
-                    # Фильтр расстояния от EMA 200
-                    if ema_distance_pct < 0.4 or ema_distance_pct > 2.2:
-                        continue 
-
-                    # Фильтр минимального размера тела свечи (ATR-фильтр)
-                    candle_body = abs(prev_close - prev_open)
-                    avg_atr = calculate_atr(ohlcv_5m, 14)
-                    if avg_atr > 0 and candle_body < (avg_atr * 0.35):
-                        continue # Отсекаем мелкие свечи-«доджи» во флете
-
-                    is_bullish = (prev_close > ema_5m) and (closes_1h[-1] > ema_1h) and (closes_4h[-1] > ema_4h)
-                    is_bearish = (prev_close < ema_5m) and (closes_1h[-1] < ema_1h) and (closes_4h[-1] < ema_4h)
-
-                    if not is_bullish and not is_bearish:
-                        continue 
-
-                    direction = 'LONG' if is_bullish else 'SHORT'
-                    if not is_system_ready:
-                        continue
-
-                    win_rate = simulate_trade_probability(ohlcv_5m, direction)
-                    if win_rate >= MIN_WIN_RATE:
-                        cycle_candidates.append({
-                            'symbol': symbol,
-                            'direction': direction,
-                            'current_price': current_price,
-                            'win_rate': win_rate,
-                            'distance': ema_distance_pct
-                        })
-                except Exception as ex:
-                    logger.error(f"Error analyzing {symbol}: {ex}")
-
-            if not is_system_ready:
-                is_system_ready = True
-                logger.info("🛡 Бот активирован с фильтрами шума!")
-                await asyncio.sleep(120)
-                continue
-
-            cycle_candidates.sort(key=lambda x: x['win_rate'], reverse=True)
-
-            # Открытие подходящих сделок
-            for best in cycle_candidates:
-                margin = VIRTUAL_BALANCE * 0.10  
-                
-                if best['direction'] == 'LONG':
-                    tp = best['current_price'] * (1 + (TAKE_PROFIT_PCT / 100) / LEVERAGE)
-                    sl = best['current_price'] * (1 - (STOP_LOSS_PCT / 100) / LEVERAGE)
-                else:
-                    tp = best['current_price'] * (1 - (TAKE_PROFIT_PCT / 100) / LEVERAGE)
-                    sl = best['current_price'] * (1 + (STOP_LOSS_PCT / 100) / LEVERAGE)
-
-                position = {
-                    'symbol': best['symbol'],
-                    'direction': best['direction'],
-                    'entry_price': best['current_price'],
-                    'margin': margin,
-                    'tp': tp,
-                    'sl': sl,
-                    'win_rate': best['win_rate']
-                }
-                active_positions.append(position)
-                sent_signals.add(best['symbol'])
-
-                msg = (
-                    f"🎯 *ВИРТУАЛЬНАЯ СДЕЛКА (С ФИЛЬТРОМ)*\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"📊 Монета: `{best['symbol']}` | Направление: **{best['direction']}**\n"
-                    f"📈 Win-Rate: `{best['win_rate']:.1f}%` | Отрыв EMA: `{best['distance']:.2f}%`\n"
-                    f"💰 Маржа: `${margin:.2f}` (Плечо {LEVERAGE}x)\n"
-                    f"📍 **Цена входа:** `{best['current_price']:.4f}`\n"
-                    f"🟢 **Тейк-профит:** `{tp:.4f}` (+50% / +3.33% цены)\n"
-                    f"🔴 **Стоп-лосс:** `{sl:.4f}` (-20% / -1.33% цены)\n"
-                    f"💼 Баланс: **${VIRTUAL_BALANCE:.2f}**"
-                )
-                await send_telegram_alert(msg)
-
-            logger.info(f"💤 Цикл завершен. Активных всего: {len(active_positions)}. Баланс: ${VIRTUAL_BALANCE:.2f}")
-            await asyncio.sleep(120)
-
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=6)
+        if len(ohlcv) < 6:
+            return False, 0
+        
+        # Объем текущей (последней закрытой) свечи
+        current_volume = ohlcv[-2][5]
+        # Средний объем предыдущих 4 свечей
+        avg_volume = sum([candle[5] for candle in ohlcv[-6:-2]]) / 4
+        
+        if avg_volume == 0:
+            return False, 0
+            
+        ratio = current_volume / avg_volume
+        if ratio >= 4.0:
+            return True, ratio
     except Exception as e:
-        logger.error(f"Critical error: {e}")
-    finally:
-        await exchange.close()
+        print(f"Ошибка получения свечей: {e}")
+    return False, 0
 
-@app.on_event("startup")
-async def startup_event():
-    await send_telegram_alert("🚀 *Бот обновлен: внедрены фильтры подтверждения телом свечи и ATR для защиты от флета!*")
-    asyncio.create_task(monitor_and_trade_loop())
+def monitor_active_position(entry_price, side):
+    """Отслеживание позиции до закрытия по TP/SL и отправка отчета в Telegram"""
+    send_telegram(f"🚀 <b>Вход в позицию!</b>\nПара: {SYMBOL}\nНаправление: {side}\nЦена входа: ${entry_price:.2f}\nПлечо: {LEVERAGE}x")
+    
+    tp1_hit = False
+    
+    while True:
+        time.sleep(10)
+        try:
+            positions = exchange.fetch_positions([SYMBOL])
+            active = [p for p in positions if float(p.get('contracts', 0)) > 0]
+            
+            if not active:
+                # Позиция полностью закрылась (по SL или финальному TP)
+                send_telegram(f"🏁 <b>Позиция по {SYMBOL} полностью закрыта!</b>")
+                break
+                
+            ticker = exchange.fetch_ticker(SYMBOL)
+            current_price = ticker['last']
+            
+            # Чекпоинт TP1 (+3%)
+            if not tp1_hit:
+                if side == 'BUY' and current_price >= entry_price * (1 + TP1_PCT):
+                    tp1_hit = True
+                    send_telegram(f"🎯 <b>Достигнут TP1 (3%) по {SYMBOL}!</b>\nПеревод позиции в безубыток.")
+                elif side == 'SELL' and current_price <= entry_price * (1 - TP1_PCT):
+                    tp1_hit = True
+                    send_telegram(f"🎯 <b>Достигнут TP1 (3%) по {SYMBOL}!</b>\nПеревод позиции в безубыток.")
+                    
+        except Exception as e:
+            print(f"Ошибка мониторинга: {e}")
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("bot:app", host="0.0.0.0", port=port)
+def main():
+    send_telegram("🤖 <b>Импульсный торговый бот запущен и следит за рынком 24/7!</b>")
+    
+    # Установка кредитного плеча
+    try:
+        exchange.set_leverage(LEVERAGE, SYMBOL)
+    except Exception as e:
+        print(f"Плечо уже установлено или ошибка: {e}")
+
+    while True:
+        try:
+            breakout, ratio = check_volume_breakout()
+            if breakout:
+                ticker = exchange.fetch_ticker(SYMBOL)
+                price = ticker['last']
+                
+                # Расчет объёма ордера с плечом 5x
+                amount = (POSITION_SIZE_USD * LEVERAGE) / price
+                
+                # Выставляем рыночный ордер на покупку (LONG)
+                order = exchange.create_market_buy_order(SYMBOL, amount)
+                entry_price = float(order.get('price', price))
+                
+                # Устанавливаем Hard Stop-Loss (1.8%)
+                sl_price = entry_price * (1 - STOP_LOSS_PCT)
+                exchange.create_order(
+                    symbol=SYMBOL,
+                    type='stop_market',
+                    side='sell',
+                    amount=amount,
+                    params={'stopPrice': sl_price, 'reduceOnly': True}
+                )
+                
+                # Переходим в режим отслеживания позиции
+                monitor_active_position(entry_price, 'BUY')
+                
+        except Exception as e:
+            print(f"Ошибка в основном цикле: {e}")
+            
+        time.sleep(15)
+
+if __name__ == '__main__':
+    main()

@@ -1,3 +1,7 @@
+import time
+import requests
+import ccxt
+
 # Вставьте ваши реальные данные прямо сюда:
 API_KEY = Oy7XUNVKQb3uh42fvJ
 API_SECRET = 2kE4VvEs1P80mZ8lFeJY3U0dVh095S6tM266

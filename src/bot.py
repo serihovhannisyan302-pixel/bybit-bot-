@@ -37,27 +37,22 @@ def get_top_symbols(limit=50):
     """Автоматическое получение топ-монет по объему торгов с фьючерсов Bybit"""
     try:
         exchange.load_markets()
-        # Фильтруем активные линейные USDT-фьючерсы
         symbols = [
             market['symbol'] for market in exchange.markets.values()
             if market['linear'] and market['active'] and market['quote'] == 'USDT'
         ]
         
-        # Получаем тикеры для сортировки по суточному объему торгов
         tickers = exchange.fetch_tickers(symbols)
         
-        # Сортируем монеты по объему торгов (quoteVolume) в убывающем порядке
         sorted_symbols = sorted(
             [s for s in symbols if s in tickers and tickers[s]['quoteVolume']],
             key=lambda x: tickers[x]['quoteVolume'],
             reverse=True
         )
         
-        # Возвращаем топ N монеты
         return sorted_symbols[:limit]
     except Exception as e:
-        print(f"Ошибка получения списка монеты: {e}")
-        # Резервный список на случай сбоя API
+        print(f"Ошибка получения списка монет: {e}")
         return ['ZEC/USDT:USDT', 'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
 
 def check_volume_breakout(symbol):
@@ -77,7 +72,6 @@ def check_volume_breakout(symbol):
         if ratio >= 4.0:
             return True, ratio
     except Exception as e:
-        # Снижаем уровень логирования для редких ошибок сети по отдельным монетам
         pass
     return False, 0
 
@@ -125,7 +119,6 @@ def main():
                 if breakout:
                     print(f"Найден импульс на {symbol}! Радио: {ratio:.2f}x")
                     
-                    # Установка кредитного плеча для монеты
                     try:
                         exchange.set_leverage(LEVERAGE, symbol)
                     except:
@@ -136,11 +129,9 @@ def main():
                     
                     amount = (POSITION_SIZE_USD * LEVERAGE) / price
                     
-                    # Открытие LONG ордера
                     order = exchange.create_market_buy_order(symbol, amount)
                     entry_price = float(order.get('price', price))
                     
-                    # Стоп-лосс
                     sl_price = entry_price * (1 - STOP_LOSS_PCT)
                     exchange.create_order(
                         symbol=symbol,
@@ -150,16 +141,13 @@ def main():
                         params={'stopPrice': sl_price, 'reduceOnly': True}
                     )
                     
-                    # Переходим в мониторинг сделки
                     monitor_active_position(symbol, entry_price, 'BUY')
                     
-                # Небольшая пауза между запросами монет, чтобы не превысить лимиты биржи
                 time.sleep(1)
 
         except Exception as e:
             print(f"Ошибка в общем цикле сканирования: {e}")
             
-        # Пауза перед следующим полным кругом сканирования топ-50
         time.sleep(30)
 
 if __name__ == '__main__':

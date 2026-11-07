@@ -123,7 +123,7 @@ def main():
             for symbol in top_symbols:
                 breakout, ratio = check_volume_breakout(symbol)
                 if breakout:
-                    print(Найден импульс на {symbol}! Радио: {ratio:.2f}x)
+                    print(f"Найден импульс на {symbol}! Радио: {ratio:.2f}x")
                     
                     # Установка кредитного плеча для монеты
                     try:

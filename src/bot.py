@@ -4,7 +4,7 @@ import ccxt
 
 # Ваши защищенные ключи и токены
 API_KEY = 'Oy7XUNVKQb3uh42fvJ'
-API_SECRET = '2kE4VvEs1P80mZ8lFeJY3U0dVh' + '095S6tM266'
+API_SECRET = '2kE4VvEs1P80mZ8lFeJY3U0dVh095S6tM266'
 TELEGRAM_TOKEN = '9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw'
 TELEGRAM_CHAT_ID = '6264127581'
 
@@ -38,13 +38,13 @@ def get_top_symbols(limit=50):
         exchange.load_markets()
         symbols = [
             market['symbol'] for market in exchange.markets.values()
-            if market['linear'] and market['active'] and market['quote'] == 'USDT'
+            if market.get('linear') and market.get('active') and market.get('quote') == 'USDT' and ':' not in market['symbol']
         ]
         
         tickers = exchange.fetch_tickers(symbols)
         
         sorted_symbols = sorted(
-            [s for s in symbols if s in tickers and tickers[s]['quoteVolume']],
+            [s for s in symbols if s in tickers and tickers[s].get('quoteVolume')],
             key=lambda x: tickers[x]['quoteVolume'],
             reverse=True
         )
@@ -52,7 +52,7 @@ def get_top_symbols(limit=50):
         return sorted_symbols[:limit]
     except Exception as e:
         print(f"Ошибка получения списка монет: {e}")
-        return ['ZEC/USDT:USDT', 'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
+        return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT']
 
 def check_volume_breakout(symbol):
     """Проверка всплеска объема 4x-5x на 15m таймфрейме"""

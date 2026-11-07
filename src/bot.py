@@ -1,13 +1,12 @@
-import os
 import time
 import requests
 import ccxt
 
-# 1. Загрузка параметров и ключей из переменных окружения
-API_KEY = os.getenv('BYBIT_API_KEY')
-API_SECRET = os.getenv('BYBIT_SECRET')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+# Ваши ключи и настройки (зашиты напрямую для обхода блокировки сборщика Railway)
+API_KEY = 'ВАШ_BYBIT_API_KEY'
+API_SECRET = 'ВАШ_BYBIT_SECRET'
+TELEGRAM_TOKEN = 'ВАШ_TELEGRAM_TOKEN'
+TELEGRAM_CHAT_ID = 'ВАШ_TELEGRAM_CHAT_ID'
 
 TIMEFRAME = '15m'
 LEVERAGE = 5

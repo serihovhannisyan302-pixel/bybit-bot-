@@ -1,20 +1,16 @@
-import time
-import requests
-import ccxt
-
-# Ваши ключи и настройки (зашиты напрямую для обхода блокировки сборщика Railway)
-API_KEY = 'ВАШ_BYBIT_API_KEY'
-API_SECRET = 'ВАШ_BYBIT_SECRET'
-TELEGRAM_TOKEN = 'ВАШ_TELEGRAM_TOKEN'
-TELEGRAM_CHAT_ID = 'ВАШ_TELEGRAM_CHAT_ID'
+# Вставьте ваши реальные данные прямо сюда:
+API_KEY = Oy7XUNVKQb3uh42fvJ
+API_SECRET = 2kE4VvEs1P80mZ8lFeJY3U0dVh095S6tM266
+TELEGRAM_TOKEN = 9107764551:AAGWWaxreGFTeuRS0BJsz50BqN3LvhsOWXw
+TELEGRAM_CHAT_ID = 6264127581
 
 TIMEFRAME = '15m'
 LEVERAGE = 5
-POSITION_SIZE_USD = 10  # Маржа $10 (объем с плечом $50)
+POSITION_SIZE_USD = 10  # Маржа $10 (общий объем позиции с плечом — $50)
 STOP_LOSS_PCT = 0.018   # Стоп-лосс 1.8%
 TP1_PCT = 0.03          # Тейк-профит 3%
 
-# Инициализация подключения к Bybit (Futures / Unified)
+# Инициализация подключения к Bybit Futures
 exchange = ccxt.bybit({
     'apiKey': API_KEY,
     'secret': API_SECRET,
@@ -55,7 +51,7 @@ def get_top_symbols(limit=50):
         return ['ZEC/USDT:USDT', 'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
 
 def check_volume_breakout(symbol):
-    """Проверка всплеска объема 4x-5x на 15m timeframe для конкретной монеты"""
+    """Проверка всплеска объема 4x-5x на 15m таймфрейме"""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=6)
         if len(ohlcv) < 6:
@@ -75,7 +71,7 @@ def check_volume_breakout(symbol):
     return False, 0
 
 def monitor_active_position(symbol, entry_price, side):
-    """Отслеживание открытой позиции"""
+    """Отслеживание открытой позиции и фиксация результатов"""
     send_telegram(f"🚀 <b>Вход в позицию!</b>\nПара: {symbol}\nНаправление: {side}\nЦена входа: ${entry_price:.4f}\nПлечо: {LEVERAGE}x")
     
     tp1_hit = False
@@ -105,7 +101,7 @@ def monitor_active_position(symbol, entry_price, side):
             print(f"Ошибка мониторинга позиции: {e}")
 
 def main():
-    send_telegram("🤖 <b>Мультисканер (Топ-50 монет) запущен и сканирует рынок 24/7!</b>")
+    send_telegram("🤖 <b>Мультисканер топ-50 монет запущен и работает 24/7!</b>")
 
     while True:
         try:
